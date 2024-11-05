@@ -1,0 +1,15 @@
+server {
+    listen 80;
+    server_name _;  # Замените на ваше доменное имя или IP-адрес
+
+    root /var/www/html;     # Укажите путь к корневому каталогу
+    index test.html;        # Укажите имя индексного файла
+
+    location / {
+        try_files $uri $uri/ =404;  # Вернуть 404, если файл не найден
+    }
+
+    location ~ /\.ht {
+        deny all;  # Запретить доступ к .ht файлам
+    }
+}
