@@ -464,4 +464,296 @@ Zabbix agent:
         - zabbix-agent2     
 ```
 
+## Логи
+Cоздайте ВМ, разверните на ней Elasticsearch. Установите filebeat в ВМ к веб-серверам, настройте на отправку access.log, error.log nginx в Elasticsearch.
 
+Создайте ВМ, разверните на ней Kibana, сконфигурируйте соединение с Elasticsearch.
+
+### Для построения ELK стека используем следующие ресурсы Terraform:
+```
+resource "yandex_compute_instance" "kibana" {
+  name = "kibana"
+  zone = "ru-central1-a"
+
+  resources {
+    cores  = 2
+    memory = 2
+  }
+
+  boot_disk {
+    initialize_params {
+      image_id = "fd8tvc3529h2cpjvpkr5"
+      type     = "network-hdd"
+      size     = 10
+    }
+  }
+
+  network_interface {
+    subnet_id = yandex_vpc_subnet.subnet-1.id
+    nat       = true
+  }
+
+  metadata = {
+    user-data = "${file("meta.txt")}"    
+  }
+}
+
+resource "yandex_compute_instance" "elasticsearch" {
+  name = "elasticsearch"
+  zone = "ru-central1-a"
+
+  resources {
+    cores  = 2
+    memory = 2
+  }
+
+  boot_disk {
+    initialize_params {
+      image_id = "fd8tvc3529h2cpjvpkr5"
+      type     = "network-hdd"
+      size     = 10
+    }
+  }
+
+  network_interface {
+    subnet_id = yandex_vpc_subnet.subnet-1.id
+  }
+
+  security_group_ids = [yandex_vpc_security_group.elasticsearch_sg.id]
+
+  metadata = {
+    user-data = "${file("meta.txt")}"    
+  }
+}
+```
+
+### Для настройки ВМ с помощью Ansible будем использовать docker образы:
+```
+- name: Install  Docker
+  hosts: elasticsearch, kibana, web
+  become: true
+
+  tasks:
+
+    - name: Update APT package index
+      apt:
+        update_cache: yes
+
+
+    - name: install dependencies
+      apt:
+        name: "{{item}}"
+        state: present
+        update_cache: yes
+      loop:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - gnupg-agent
+        - software-properties-common
+
+    - name: add GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: add docker repository to apt
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu bionic stable
+        state: present
+
+    - name: Update APT package index (after adding Docker repository)
+      apt:
+        update_cache: yes
+
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: latest
+
+    - name: Ensure the current user is added to the docker group
+      user:
+        name: "{{ ansible_user }}"  # текущий пользователь
+        group: docker
+        append: yes
+
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+- name: Install  elasticsearch
+  hosts: elasticsearch
+  become: true
+
+  tasks:
+
+    - name: Run Bitnami Elasticsearch container
+      docker_container:
+        name: elasticsearch
+        image: bitnami/elasticsearch:latest
+        state: started
+        restart_policy: unless-stopped
+        published_ports:
+          - "9200:9200"
+        env:
+          discovery.type: single-node
+          ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+
+- name: Install  kibana
+  hosts: kibana
+  become: true
+
+  tasks:          
+
+    - name: Set elasticsearch server IP
+      set_fact:
+        elasticsearch_server_ip: "{{ hostvars[groups['elasticsearch'][0]]['ansible_host'] }}"
+
+    - name: Run Bitnami Kibana container
+      docker_container:
+        name: kibana
+        image: bitnami/kibana:latest
+        state: started
+        restart_policy: unless-stopped
+        published_ports:
+          - "5601:5601"
+        env:
+          KIBANA_ELASTICSEARCH_URL: "http://{{ elasticsearch_server_ip }}:9200"           
+
+
+- name: настройка web
+  hosts: web
+  become: yes 
+   
+  tasks:
+
+  - name: Set elasticsearch server IP
+    set_fact:
+      elasticsearch_server_ip: "{{ hostvars[groups['elasticsearch'][0]]['ansible_host'] }}"
+
+  - name: Create directory for Filebeat config
+    file:
+      path: /etc/filebeat
+      state: directory
+      mode: '0755'
+
+  - name: Copy Filebeat configuration
+    copy:
+      dest: /etc/filebeat/filebeat.yml
+      content: |
+        filebeat.inputs:
+          - type: log
+            enabled: true
+            paths:
+              - /var/log/nginx/access.log
+              - /var/log/nginx/error.log
+            fields:
+              service: nginx
+
+        output.elasticsearch:
+          hosts: ["http://{{ elasticsearch_server_ip }}:9200"]    
+
+  - name: Run Filebeat Docker container
+    docker_container:
+      name: filebeat
+      image: chainguard/filebeat:latest  
+      state: started
+      restart_policy: unless-stopped
+      volumes:
+        - /var/log/nginx:/var/log/nginx  # Монтируем логи Nginx
+        - /etc/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml  # Конфигурация Filebeat
+      network_mode: "host"  # Или используйте подходящую настройку сети
+
+  - name: Ensure permissions on log files
+    file:
+      path: /var/log/nginx
+      owner: root
+      group: root
+      mode: '0755'
+```
+
+### Сеть
+Разверните один VPC. Сервера web, Elasticsearch поместите в приватные подсети. Сервера Zabbix, Kibana, application load balancer определите в публичную подсеть.
+
+Настройте Security Groups соответствующих сервисов на входящий трафик только к нужным портам.
+
+Настройте ВМ с публичным адресом, в которой будет открыт только один порт — ssh. Настройте все security groups на разрешение входящего ssh из этой security group. Эта вм будет реализовывать концепцию bastion host. Потом можно будет подключаться по ssh ко всем хостам через этот хост.
+
+### Для решения данной задачи добавляем в код Terraform еще одну ВМ, создаем группы безопастности и добавляем правила для каждой ВМ
+```
+resource "yandex_vpc_security_group" "bastion_sg" {
+  name = "bastion-sg"
+  network_id = yandex_vpc_network.main_network.id
+
+  ingress {
+    protocol = "tcp"
+    port     = 22
+    # Разрешаем доступ по SSH только с IP адреса вашего рабочего места:
+    # cidr_blocks = ["<your_ip_address>/32"]
+    security_group_id = yandex_vpc_security_group.web_sg.id
+  }
+}
+
+resource "yandex_vpc_security_group" "web_sg" {
+  name = "web-sg"
+  network_id = yandex_vpc_network.main_network.id
+
+  ingress {
+    protocol = "tcp"
+    port     = 80
+  }
+
+  ingress {
+    protocol = "tcp"
+    port     = 443
+  }
+}
+
+resource "yandex_vpc_security_group" "elasticsearch_sg" {
+  name = "elasticsearch-sg"
+  network_id = yandex_vpc_network.main_network.id
+
+  ingress {
+    protocol = "tcp"
+    port     = 9200
+  }
+}
+resource "yandex_compute_instance" "bastion" {
+  name = "bastion"
+  zone = "ru-central1-a"
+
+  resources {
+    cores  = 2
+    memory = 2
+  }
+
+  boot_disk {
+    initialize_params {
+      image_id = "fd8tvc3529h2cpjvpkr5"
+      type     = "network-hdd"
+      size     = 10
+    }
+  }
+
+  network_interface {
+    subnet_id = yandex_vpc_subnet.subnet-1.id
+  }
+
+  security_group_ids = [
+    yandex_vpc_security_group.bastion_sg.id,
+    yandex_vpc_security_group.web_sg.id
+  ]
+  
+
+  metadata = {
+    user-data = "${file("meta.txt")}"    
+  }
+}
+```
