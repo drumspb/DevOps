@@ -246,3 +246,58 @@ resource "yandex_alb_load_balancer" "test-balancer" {
       name: nginx
       state: restarted
 ```
+## Мониторинг
+Создайте ВМ, разверните на ней Zabbix. На каждую ВМ установите Zabbix Agent, настройте агенты на отправление метрик в Zabbix.
+
+Настройте дешборды с отображением метрик, минимальный набор — по принципу USE (Utilization, Saturation, Errors) для CPU, RAM, диски, сеть, http запросов к веб-серверам. Добавьте необходимые tresholds на соответствующие графики.
+
+### Для построения мониторинга создаем следующий ресурсы Terraform:
+```
+resource "yandex_compute_instance" "zabbix_server" {
+  name = "zabbix-server"
+    zone = "ru-central1-a"
+
+  resources {
+    cores  = 2
+    memory = 2
+  }
+
+  boot_disk {
+    initialize_params {
+      image_id = "fd8tvc3529h2cpjvpkr5"  # ID образа с установленным Zabbix
+      type     = "network-hdd"
+      size     = 20
+    }
+  }
+
+  network_interface {
+    subnet_id = yandex_vpc_subnet.subnet-1.id
+    nat = true
+  }
+
+  security_group_ids = [yandex_vpc_security_group.web_sg.id]
+
+  metadata = {
+    user-data = "${file("meta.txt")}"    
+  }
+}
+```
+Для автоманитации развертования мониторинга, мной была зарание созданна БД Zabbix в которой был настроен Autoregistration actions
+
+![image](https://github.com/user-attachments/assets/02402cc9-8ed6-4092-b4a5-6725816622b7)
+
+А так же был настроен Templates который автоматически применяется для всех машин обращающихся к active server
+
+![image](https://github.com/user-attachments/assets/f2784a16-77d5-447a-b22b-f6210a090e96)
+
+В правиле DevOps были настроенны Items
+
+![image](https://github.com/user-attachments/assets/ab8a8749-3705-447d-b256-aedc738376a8)
+
+Созданны Triggers
+
+![image](https://github.com/user-attachments/assets/660c5a4e-d2b1-42d8-8da4-ccec605a390c)
+
+
+
+
