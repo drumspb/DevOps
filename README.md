@@ -1,14 +1,14 @@
 # Задача
 Ключевая задача — разработать отказоустойчивую инфраструктуру для сайта, включающую мониторинг, сбор логов и резервное копирование основных данных. Инфраструктура должна размещаться в Yandex Cloud.
 
-### Инфраструктура
+## Инфраструктура
 Для развёртки инфраструктуры используйте Terraform и Ansible.
 
 Параметры виртуальной машины (ВМ) подбирайте по потребностям сервисов, которые будут на ней работать.
 
 Ознакомьтесь со всеми пунктами из этой секции, не беритесь сразу выполнять задание, не дочитав до конца. Пункты взаимосвязаны и могут влиять друг на друга.
 
-### Сайт
+## Сайт
 Создайте две ВМ в разных зонах, установите на них сервер nginx, если его там нет. ОС и содержимое ВМ должно быть идентичным, это будут наши веб-сервера.
 
 Используйте набор статичных файлов для сайта. Можно переиспользовать сайт из домашнего задания.
@@ -172,7 +172,7 @@ resource "yandex_alb_load_balancer" "test-balancer" {
       subnet_id = yandex_vpc_subnet.subnet-2.id 
     }
   }
-  
+
   listener {
     name = "my-listener"
     endpoint {
@@ -190,4 +190,59 @@ resource "yandex_alb_load_balancer" "test-balancer" {
   }
 }
 
+```
+### И следующий код Ansible
+```
+- name: настройка web
+  hosts: web
+  become: yes 
+   
+  tasks:
+
+  - name: Установить необходимые пакеты
+    apt:
+      name:
+        - nginx
+        - apt-transport-https
+        - wget
+      state: present
+
+  - name: Установить и настроить конфигурацию Nginx
+    template: 
+      src: default.conf.j2
+      dest: /etc/nginx/sites-available/default
+    notify:
+      - Перезапустить Nginx
+
+  - name: Set elasticsearch server IP
+    set_fact:
+      elasticsearch_server_ip: "{{ hostvars[groups['elasticsearch'][0]]['ansible_host'] }}"
+
+  - name: Копировать файл test.html в каталог для веб-сайта
+    copy:
+      src: /home/drum/DevOps/test.html  # Укажите путь к файлу test.html на вашем компьютере
+      dest: /var/www/html/test.html
+      owner: www-data
+      group: www-data
+      mode: '0644'
+
+  - name: Проверить файл test.html
+    stat:
+      path: /var/www/html/test.html
+    register: test_html_file
+
+  - name: Вывести информацию о файле
+    debug:
+      msg: "Файл теста существует: {{ test_html_file.stat.exists }}"
+
+  - name: Убедиться, что Nginx запущен и включен
+    service:
+      name: nginx
+      state: started
+      enabled: yes
+
+  - name: Перезапустить Nginx
+    service:
+      name: nginx
+      state: restarted
 ```
