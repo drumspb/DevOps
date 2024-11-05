@@ -298,6 +298,170 @@ resource "yandex_compute_instance" "zabbix_server" {
 
 ![image](https://github.com/user-attachments/assets/660c5a4e-d2b1-42d8-8da4-ccec605a390c)
 
+### Zabbix server а так же дамп базы автоматически подгружается в облако следующим кодом Ansible:
+```
+- name: Install Zabbix Server
+  hosts: zabbix_server
+  become: true
+  vars:
+    ansible_remote_tmp: /tmp/.ansible-${USER}
 
+  tasks:
+    - name: Скачать пакет репозитория Zabbix
+      get_url:
+        url: https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_7.0-2+ubuntu24.04_all.deb
+        dest: /tmp/zabbix-release_7.0-2+ubuntu24.04_all.deb
+
+    - name: Установить пакет репозитория Zabbix с помощью dpkg
+      command: sudo dpkg -i /tmp/zabbix-release_7.0-2+ubuntu24.04_all.deb
+
+    - name: Обновить пакетный список apt после установки репозитория Zabbix
+      apt:
+        update_cache: yes
+
+    - name: Install required packages
+      apt:
+        name:
+          - acl
+          - python3-pip
+          - python3-psycopg2
+          - postgresql
+          - zabbix-server-pgsql
+          - zabbix-frontend-php
+          - php8.3-pgsql
+          - zabbix-apache-conf
+          - zabbix-sql-scripts
+          - zabbix-agent
+        state: present
+
+    - name: Создать резервную копию pg_hba.conf
+      copy:
+        src: /etc/postgresql/16/main/pg_hba.conf  # Замените на ваш путь
+        dest: /etc/postgresql/16/main/pg_hba.conf.bak
+        remote_src: yes
+
+    - name: Изменения правил подключения для postgres
+      community.postgresql.postgresql_pg_hba:
+        dest: /etc/postgresql/16/main/pg_hba.conf
+        contype: local
+        databases: all
+        users: postgres
+        state: present
+        method: trust
+
+    - name: Перезапустить PostgreSQL
+      service:
+        name: postgresql
+        state: restarted        
+   
+    - name: Create Zabbix database user
+      become: true
+      become_method: enable
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: zabbix
+        password: password
+        state: present
+
+    - name: Загрузка файла на ansible хост
+      ansible.builtin.copy:
+        src: /home/drum/DevOps/zabbix.dump
+        dest: /tmp/zabbix.dump
+
+    - name: Create Zabbix database
+      become_user: postgres
+      postgresql_db:
+        name: zabbix
+        owner: zabbix
+
+    - name: Restore базы zabbix на зарание созданную
+      become: true
+      become_method: enable
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: zabbix
+        state: restore
+        target: /tmp/zabbix.dump
+
+    - name: Configure Zabbix server
+      lineinfile:
+        path: /etc/zabbix/zabbix_server.conf
+        regexp: '^DBPassword='
+        line: 'DBPassword=password'
+        state: present
+
+    - name: Restart services
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+        enabled: true
+      loop:
+        - zabbix-server
+        - zabbix-agent
+        - apache2
+```
+Zabbix agent:
+```
+- name: Install Zabbix agent
+  hosts: all
+  become: true
+  vars:
+    ansible_remote_tmp: /tmp/.ansible-${USER}
+
+  tasks:
+    - name: Get Zabbix server IP
+      set_fact:
+        zabbix_server_ip: "{{ item }}"
+      loop: "{{ groups['zabbix_server'] }}"
+      when: "inventory_hostname != item"
+
+    - name: Скачать пакет репозитория Zabbix
+      get_url:
+        url: https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_7.0-2+ubuntu24.04_all.deb
+        dest: /tmp/zabbix-release_7.0-2+ubuntu24.04_all.deb
+
+    - name: Установить пакет репозитория Zabbix с помощью dpkg
+      command: sudo dpkg -i /tmp/zabbix-release_7.0-2+ubuntu24.04_all.deb
+
+    - name: Обновить пакетный список apt после установки репозитория Zabbix
+      apt:
+        update_cache: yes   
+
+    - name: Install required packages
+      apt:
+        name:
+          - zabbix-agent2
+          - zabbix-agent2-plugin-*
+        state: present
+
+    - name: Update Server parameter
+      ansible.builtin.replace:
+        path: /etc/zabbix/zabbix_agent2.conf
+        regexp: '^Server=.*'
+        replace: 'Server={{ zabbix_server_ip }}'
+        backup: yes  # Создать резервную копию файла перед изменением
+
+    - name: Update ActiveServer parameter
+      ansible.builtin.replace:
+        path: /etc/zabbix/zabbix_agent2.conf
+        regexp: '^ServerActive=.*'
+        replace: 'ServerActive={{ zabbix_server_ip }}'
+        backup: yes  # Создать резервную копию файла перед изменением
+
+    - name: Update ActiveServer parameter
+      ansible.builtin.replace:
+        path: /etc/zabbix/zabbix_agent2.conf
+        regexp: '^Hostname=.*'
+        replace: 'Hostname={{ inventory_hostname }}'
+        backup: yes  # Создать резервную копию файла перед изменением        
+
+    - name: Restart services
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+        enabled: true
+      loop:
+        - zabbix-agent2     
+```
 
 
