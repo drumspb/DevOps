@@ -759,4 +759,5 @@ resource "yandex_compute_instance" "bastion" {
 ```
 # Итоговые файлы:
 https://github.com/drumspb/DevOps/blob/main/ansileplaybook.yml
+
 https://github.com/drumspb/DevOps/blob/main/main.tf
